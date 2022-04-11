@@ -6,14 +6,21 @@ import json
 import logging
 import math
 import os
+import pdb
 import sys
 import pickle
 from argparse import ArgumentParser, Namespace
 from functools import reduce
 from typing import Any, Dict, List, Optional, Tuple, Union
 import time
-
+import pdb
 import numpy as np
+from collections import OrderedDict
+
+import wandb
+from intrinsics_dimension import mle_id, twonn_pytorch
+ID_functions = {"twonn" : twonn_pytorch, "mle" : mle_id}
+
 import torch
 import torch.nn.functional as F
 from pytorch_lightning import LightningModule, Trainer
@@ -21,7 +28,7 @@ from pytorch_lightning.callbacks import Callback, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
-
+# torch.set_default_dtype(torch.float64)
 import grok.metrics as metrics
 from grok.data import (
     DEFAULT_DATA_DIR,
@@ -34,7 +41,7 @@ from grok.transformer import Transformer
 from grok.measure import get_sharpness
 
 DEFAULT_LOG_DIR = "logs"
-
+WANDB_DIR = "/home/hattie/scratch/wandb/"
 
 class TrainableTransformer(LightningModule):
     """
@@ -47,7 +54,14 @@ class TrainableTransformer(LightningModule):
                         self.add_model_specific_args().
         """
         super().__init__()
-        self.hparams = hparams  # type: ignore
+        try :
+            self.hparams = hparams  # type: ignore
+        except AttributeError: #can't set attribute
+            for key, value in vars(hparams).items() : setattr(self.hparams, key, value)
+            # https://github.com/PyTorchLightning/pytorch-lightning/discussions/7525
+            #self.hparams.update(hparams)
+            #self.save_hyperparameters(hparams)
+
         self.prepare_data()
 
         self.transformer = Transformer(
@@ -59,11 +73,28 @@ class TrainableTransformer(LightningModule):
             len(self.train_dataset.tokenizer),
             hparams.non_linearity,
             weight_noise=self.hparams.weight_noise,
+            # skip_layer_norm = self.hparams.freeze_norm
         )
+
+        if hparams.load_from_ckpt is not None:
+            pre_ckpt = torch.load(hparams.load_from_ckpt)
+            # pre_state_dict = OrderedDict((k.split('transformer.')[1], v) for k, v in pre_ckpt['state_dict'].items())
+            self.load_pretrained_state_dict(pre_ckpt['state_dict'])
 
         self.margin = torch.Tensor([0])
         self.next_epoch_to_eval = -1
         self.next_train_epoch_to_log = 0
+
+        ID_params = {"method" : "mle", "k":2, "interval":"epoch"}
+        self.ID, self.per_batch, self.per_epoch = False, False, False
+        if ID_params :
+            self.ID_function = ID_functions[ID_params.pop("method")]
+            interval = ID_params.pop("interval", "epoch")
+            self.ID_params = ID_params
+            self.per_step = interval == "step"
+            self.per_epoch = interval == "epoch"
+            self.ID = True
+            self.ID_interval = 1
 
     @staticmethod
     def add_model_specific_args(parser: ArgumentParser) -> ArgumentParser:
@@ -106,7 +137,7 @@ class TrainableTransformer(LightningModule):
         parser.set_defaults(anneal_lr=False)
 
         parser.add_argument("--max_lr", type=float, default=1e-3)
-        parser.add_argument("--weight_decay", type=float, default=0)
+        parser.add_argument("--weight_decay", type=float, default=1)
         parser.add_argument("--weight_decay_kind", type=str, default="to_zero")
         parser.add_argument("--noise_factor", type=float, default=0)
 
@@ -127,8 +158,24 @@ class TrainableTransformer(LightningModule):
             type=str,
             default=DEFAULT_DATA_DIR,
         )
-
+        
+        parser.add_argument("--save_checkpoint", action="store_true")     
+        parser.add_argument("--use_wandb", action="store_true")     
+        parser.add_argument("--group_name", type=str, default="base")
+        parser.add_argument("--load_from_ckpt", type=str, default=None)
+        parser.add_argument("--opt", type=str, default="adamw", choices=("sgd", "adamw"))
+        parser.add_argument("--momentum", type=float, default=0.9)
         return parser
+
+
+    def load_pretrained_state_dict(self, state_dict):
+        own_state = self.state_dict()
+        for name, param in state_dict.items():
+            if name not in own_state:
+                continue
+            else:
+                print(name)
+                own_state[name].copy_(param)
 
     def prepare_data(self) -> None:
         """
@@ -197,14 +244,14 @@ class TrainableTransformer(LightningModule):
         min_lr = self.hparams.max_lr / 10  # type: ignore
         warmup_steps = self.hparams.warmup_steps  # type: ignore
         if not self.hparams.anneal_lr:
-            if step <= warmup_steps:
+            if step < warmup_steps:
                 lr = (float(step) / max(warmup_steps, 1)) * max_lr
             else:
                 lr = max_lr
         else:
-            if step <= warmup_steps:
+            if step < warmup_steps:
                 lr = (float(step) / max(warmup_steps, 1)) * max_lr
-            elif step <= self.hparams.anneal_lr_steps + warmup_steps:
+            elif step < self.hparams.anneal_lr_steps + warmup_steps:
                 effective_step = step - warmup_steps
                 t = effective_step / self.hparams.anneal_lr_steps
                 cos = (1 + np.cos(np.pi * t)) / 2
@@ -220,15 +267,18 @@ class TrainableTransformer(LightningModule):
 
         :returns: optimizers and schedulers.
         """
-        optimizer = CustomAdamW(
-            self.parameters(),
-            betas=(0.9, 0.98),
-            eps=1e-8,
-            lr=1,
-            weight_decay=self.hparams.weight_decay,
-            noise_factor=self.hparams.noise_factor,
-            weight_decay_form=self.hparams.weight_decay_kind,
-        )
+        if self.hparams.opt == 'sgd':
+            optimizer = torch.optim.SGD(self.parameters(), lr=1, momentum=self.hparams.momentum, weight_decay=self.hparams.weight_decay)
+        elif self.hparams.opt == 'adamw':
+            optimizer = CustomAdamW(
+                self.parameters(),
+                betas=(0.9, 0.98),
+                eps=1e-8,
+                lr=1,
+                weight_decay=self.hparams.weight_decay,
+                noise_factor=self.hparams.noise_factor,
+                weight_decay_form=self.hparams.weight_decay_kind,
+            )
         # optimizer = SAM(
         #     self.parameters(),
         #     base_optimizer=CustomAdamW,
@@ -284,14 +334,14 @@ class TrainableTransformer(LightningModule):
                   The accuracy of the predicted solutions
                   The fraction of this dataset contained in this batch
                   The portion of the input equations left of the equal sign
-                  The softmax probilities for the solutions to the equations
+                  The softmax probabilities for the solutions to the equations
                   A list lists of attention matrices by layer and head
                   A list lists of value matrices by layer and head
                   Margin for this batch
         """
         x = batch["text"]  # shape = batchsize * context_len
         y = batch["target"]  # shape = batchsize * context_len
-        y_hat, attentions, values = self(
+        y_hat, hidden_states, attentions, values = self(
             x=x, save_activations=self.hparams.save_activations  # type: ignore
         )  # shape = batchsize * context_len * vocab_size
         y_hat = y_hat.transpose(-2, -1)  # shape = batchsize * vocab_size * context_len
@@ -353,7 +403,8 @@ class TrainableTransformer(LightningModule):
                 else:
                     grad_vec = torch.cat((grad_vec, p.grad.data.view(-1)))
             return loss, grad_vec
-        return loss, acc, coeff, x_lhs, y_hat_rhs, attentions, values
+
+        return loss, acc, coeff, x_lhs, y_hat_rhs, hidden_states, attentions, values
 
 
     def _save_inputs(self, outputs: Dict, ds: str) -> None:
@@ -430,6 +481,22 @@ class TrainableTransformer(LightningModule):
             with open(pickle_file, "wb") as fh:
                 torch.save(output, fh)
 
+    def _group_hidden_states(self, outputs):
+        # hidden_states : (nlayers+1)x(batch_size, seq_len, dim)
+        hidden_states = [
+            torch.cat([output["hidden_states"][l] for output in outputs], dim=0) 
+            for l in range(len(outputs[0]["hidden_states"]))
+        ]
+        return hidden_states
+
+    def intrinsic_dimension(self, output, hidden_states, prefix):
+        """hidden_states : (nlayers+1)x(batch_size, seq_len, dim)"""
+        for l in range(len(hidden_states)): 
+            h = hidden_states[l] # (batch_size, seq_len, dim)
+            h = h.view(h.size(0), -1) # (batch_size, seq_len*dim)
+            output[f"{prefix}ID_layer_{l}"] = self.ID_function(data=h, **self.ID_params)
+        return output
+
     def training_step(self, batch, batch_idx):
         """
         Used by pytorch_lightning
@@ -440,14 +507,17 @@ class TrainableTransformer(LightningModule):
         :returns: a dict with loss, accuracy, lr, probabilities of solutions,
                   attentions, and values
         """
+        # print(batch_idx)
+        # pdb.set_trace()
         if batch_idx == 0:
             self.training_epoch_start_time = time.time()
             self.fwd_time_in_epoch = 0
 
         start = time.time()
-        loss, accuracy, coeff, x_lhs, y_hat_rhs, attentions, values = self._step(
+        loss, accuracy, coeff, x_lhs, y_hat_rhs, hidden_states, attentions, values = self._step(
             batch=batch, batch_idx=batch_idx, train=True
         )
+
         self.fwd_time_in_epoch += time.time() - start
 
         schedulers = self.trainer.lr_schedulers[0]
@@ -462,7 +532,9 @@ class TrainableTransformer(LightningModule):
             "y_hat_rhs": y_hat_rhs,
             "partial_attentions": attentions,
             "partial_values": values,
+            "hidden_states" : hidden_states
         }
+
         if self.current_epoch == 0:
             output["x_lhs"] = x_lhs
 
@@ -480,6 +552,8 @@ class TrainableTransformer(LightningModule):
         """
         epoch_is_to_be_logged = self.current_epoch == self.next_train_epoch_to_log
         if epoch_is_to_be_logged:
+            # self.next_train_epoch_to_log = self.next_train_epoch_to_log + 1 #temporary!
+
             self.next_train_epoch_to_log = max(
                 int(1.01 * self.next_train_epoch_to_log),
                 self.next_train_epoch_to_log + 1,
@@ -500,10 +574,16 @@ class TrainableTransformer(LightningModule):
             # last_lr = outputs[-1]["learning_rate"]
             first_lr = outputs[0]["learning_rate"]
 
-            if self.hparams.save_activations or self.hparams.save_outputs:
+            if self.hparams.save_activations or self.hparams.save_outputs or self.hparams.save_checkpoint:
                 if self.current_epoch == 0:
                     self._save_inputs(outputs, ds="train")
-                self._save_activations(outputs, ds="train")
+                if self.hparams.save_activations or self.hparams.save_outputs:
+                    self._save_activations(outputs, ds="train")
+            
+            id_output = {}
+            if self.ID :
+                hidden_states = self._group_hidden_states(outputs) 
+                id_output = self.intrinsic_dimension({}, hidden_states, prefix="train_")
 
             logs = {
                 "train_loss": loss,
@@ -516,8 +596,16 @@ class TrainableTransformer(LightningModule):
                 "time_per_epoch": time.time() - self.training_epoch_start_time,
                 "fwd_time_in_epoch": self.fwd_time_in_epoch,
             }
+            logs = {**id_output, **logs}
+
             for k, v in logs.items():
                 self.log(k, v)
+                
+            if self.hparams.use_wandb:
+                db_data = {"epoch": self.current_epoch, "train loss": loss.detach(), "train accuracy": accuracy, 'lr': first_lr}
+                db_data = {**db_data, **id_output}
+                wandb.log(db_data)
+
 
     def validation_step(self, batch, batch_idx):
         """
@@ -534,7 +622,7 @@ class TrainableTransformer(LightningModule):
         if self.current_epoch != self.next_epoch_to_eval:
             return {}
         with torch.no_grad():
-            loss, accuracy, coeff, x_lhs, y_hat_rhs, attentions, values = self._step(
+            loss, accuracy, coeff, x_lhs, y_hat_rhs, hidden_states, attentions, values = self._step(
                 batch=batch, batch_idx=batch_idx, train=False
             )
         output = {
@@ -543,6 +631,7 @@ class TrainableTransformer(LightningModule):
             "y_hat_rhs": y_hat_rhs,
             "partial_attentions": attentions,
             "partial_values": values,
+            "hidden_states" : hidden_states
         }
         if self.current_epoch == 0:
             output["x_lhs"] = x_lhs
@@ -561,55 +650,74 @@ class TrainableTransformer(LightningModule):
         validation_is_real = len(outputs[0]) != 0
 
         if validation_is_real:
-            self.next_epoch_to_eval = max(
-                int(1.02 * self.next_epoch_to_eval), self.next_epoch_to_eval + 1
-            )
+            self.next_epoch_to_eval = self.next_epoch_to_eval + 1 #temporary!!
+
+            # self.next_epoch_to_eval = max(
+            #     int(1.02 * self.next_epoch_to_eval), self.next_epoch_to_eval + 1
+            # )
 
             loss = torch.stack([x["partial_val_loss"] for x in outputs]).sum()
             perplexity = torch.exp(loss)
             accuracy = torch.stack([x["partial_val_accuracy"] for x in outputs]).sum()
 
-            if self.hparams.save_activations or self.hparams.save_outputs:
+            if self.hparams.save_activations or self.hparams.save_outputs or self.hparams.save_checkpoint:
                 if self.current_epoch == 0:
                     self._save_inputs(outputs, ds="val")
-                self._save_activations(outputs, ds="val")
+                if self.hparams.save_activations or self.hparams.save_outputs:
+                    self._save_activations(outputs, ds="val")
+
+            id_output = {}
+            if self.ID :
+                hidden_states = self._group_hidden_states(outputs) 
+                id_output = self.intrinsic_dimension({}, hidden_states, prefix="val_")
 
             logs = {
                 "val_loss": loss,
                 "val_accuracy": accuracy,
                 "val_perplexity": perplexity,
             }
-            for name, param in self.named_parameters():
-                # n parameters
-                n_params = param.numel()
-                # get the l2 norm of the parameter
-                logs["paramnorm_" + name] = torch.norm(
-                    param, 2
-                ).detach().cpu().numpy() / np.sqrt(n_params)
+            logs = {**id_output, **logs}
 
             # train accuracy
             device = self.transformer.embedding.weight.device
             train_data = self.train_dataset.data.to(device)
             training_data = {"text": train_data[:, :-1], "target": train_data[:, 1:]}
             with torch.no_grad():
-                tr_loss, tr_acc, *_ = self._step(training_data, 0)
+                tr_loss, tr_acc, *_ = self._step(training_data, 0, False)
                 logs["full_train_loss"] = tr_loss
                 logs["full_train_acc"] = tr_acc
 
             for k, v in logs.items():
                 self.log(k, v)
+                
+            if self.hparams.use_wandb:
+                db_data = {"epoch": self.current_epoch, "val loss": loss.detach(), "val accuracy": accuracy,
+                           "full train acc": tr_acc, "full train loss": tr_loss}
+                db_data = {**db_data, **id_output}
+                wandb.log(db_data)
+
         # save a checkpoint if the epoch is a power of 2
-        if (
-            self.current_epoch > 0
-            and int(2 ** (int(np.log(self.current_epoch) / np.log(2))))
-            == self.current_epoch
-        ):
-            self.trainer.save_checkpoint(
-                os.path.join(
-                    self.hparams.checkpoint_path,
-                    "epoch_" + str(self.current_epoch) + ".ckpt",
+        # if (
+        #     self.current_epoch > 0
+        #     and int(2 ** (int(np.log(self.current_epoch) / np.log(2))))
+        #     == self.current_epoch
+        #     ) and self.hparams.save_checkpoint:
+        if self.current_epoch > 0 and self.hparams.save_checkpoint:
+            if self.current_epoch < 100 and self.current_epoch == int(2 ** (int(np.log(self.current_epoch) / np.log(2)))):
+                self.trainer.save_checkpoint(
+                    os.path.join(
+                        self.hparams.checkpoint_path,
+                        "epoch_" + str(self.current_epoch) + ".ckpt",
+                    )
                 )
-            )
+            elif self.current_epoch >= 100 and self.current_epoch % 50 == 0:
+                self.trainer.save_checkpoint(
+                    os.path.join(
+                        self.hparams.checkpoint_path,
+                        "epoch_" + str(self.current_epoch) + ".ckpt",
+                    )
+                )
+
         if validation_is_real:
             return logs
 
@@ -624,7 +732,7 @@ class TrainableTransformer(LightningModule):
                   attentions, and values
         """
 
-        loss, accuracy, coeff, x_lhs, y_hat_rhs, attentions, values = self._step(
+        loss, accuracy, coeff, x_lhs, y_hat_rhs, hidden_states, attentions, values = self._step(
             batch=batch, batch_idx=batch_idx, train=False, reduction="none"
         )
         output = {
@@ -633,6 +741,7 @@ class TrainableTransformer(LightningModule):
             "y_hat_rhs": y_hat_rhs,
             "partial_attentions": attentions,
             "partial_values": values,
+            "hidden_states" : hidden_states
         }
         if self.current_epoch == 0:
             output["x_lhs"] = x_lhs
@@ -653,11 +762,21 @@ class TrainableTransformer(LightningModule):
         perplexity = torch.exp(loss)
         accuracy = torch.cat([x["partial_test_accuracy"] for x in outputs], dim=0)
 
+        id_output = {}
+        # if self.ID :
+        #     hidden_states = self._group_hidden_states(outputs) 
+        #     id_output = self.intrinsic_dimension({}, hidden_states, prefix="test_")
+
         logs = {
             "test_loss": loss,
             "test_accuracy": accuracy,
             "test_perplexity": perplexity,
         }
+        logs = {**id_output, **logs}
+        if self.hparams.use_wandb:
+            db_data = {"epoch": self.current_epoch, "test loss": loss.detach(), "test accuracy": accuracy}
+            db_data = {**db_data, **id_output}
+            wandb.log(db_data) 
 
         return {"test_loss": loss, "log": logs}
 
@@ -673,6 +792,19 @@ def train(hparams: Namespace) -> None:
 
     :param hparams: An argparse.Namespace with all of the relevant hyperparameters
     """
+    
+    # set up wandb
+    if hparams.use_wandb:
+        group_vars = ["d_model", "n_heads", "random_seed", "max_steps", "max_epochs", "n_layers", "dropout", "max_context_len", "weight_noise", "train_data_pct", "math_operator", "operand_length", "weight_decay", "noise_factor", "weight_decay_kind", "batchsize", "max_lr", "warmup_steps", "anneal_lr", "anneal_lr_steps", "opt", "momentum"]
+
+        group_name = ''
+        for var in group_vars:
+            group_name = group_name + '_' + var + str(getattr(hparams, var))
+        wandb.init(project="grok_phase",
+               group=hparams.group_name,
+               name=group_name)
+        for var in group_vars:
+            wandb.config.update({var:getattr(hparams, var)})        
 
     # Process the args
     if hparams.logdir is None:
@@ -701,6 +833,7 @@ def train(hparams: Namespace) -> None:
 
     # Create the model
     model = TrainableTransformer(hparams).float()
+    # pdb.set_trace()
 
     torch.save(model, os.path.join(checkpoint_path, "init.pt"))
 
@@ -717,7 +850,7 @@ def train(hparams: Namespace) -> None:
     trainer_args = {
         "max_steps": hparams.max_steps,
         "min_steps": hparams.max_steps,
-        "max_epochs": int(1e8),
+        "max_epochs": int(1e9),
         "val_check_interval": 1,
         "profiler": False,
         # "checkpoint_callback": checkpointer,
@@ -727,8 +860,8 @@ def train(hparams: Namespace) -> None:
     }
     if torch.cuda.is_available() and hparams.gpu >= 0:
         trainer_args["gpus"] = [hparams.gpu]
-
-    trainer = Trainer(**trainer_args)
+    
+    trainer = Trainer(**trainer_args) #, progress_bar_refresh_rate=0
 
     trainer.fit(model=model)  # type: ignore
     """
@@ -793,7 +926,6 @@ def compute_sharpness(hparams: Namespace, ckpts) -> None:
 
     logger = CSVLogger(hparams.logdir)
 
-
     trainer_args = {
         "max_steps": hparams.max_steps,
         "min_steps": hparams.max_steps,
@@ -847,7 +979,6 @@ def add_args(parser=None) -> Namespace:
     # parser.add_argument("--checkpoint_period", type=int, default=1)
     parser = TrainableTransformer.add_model_specific_args(parser)
     return parser
-
 
 class CustomAdamW(torch.optim.Optimizer):
     def __init__(

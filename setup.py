@@ -5,7 +5,7 @@ setup(
     packages=find_packages(),
     version="0.0.1",
     install_requires=[
-        "pytorch_lightning",
+        "pytorch_lightning==1.5",
         "blobfile",
         "numpy",
         "torch",
@@ -13,5 +13,7 @@ setup(
         "scipy",
         "mod",
         "matplotlib",
+        "intrinsics-dimension",
+        "wandb"
     ],
 )

@@ -267,14 +267,16 @@ class Decoder(nn.Module):
         a = x
         attentions = []
         values = []
+        hidden_states = [a]
         for block in self.blocks:
             a, layer_attentions, layer_values = block(
                 a, self_attn_mask, save_activations=save_activations
             )
+            hidden_states.append(a)
             if save_activations:
                 attentions.append(layer_attentions)
                 values.append(layer_values)
-        return a, attentions, values
+        return a, hidden_states, attentions, values
 
 
 class Transformer(nn.Module):
@@ -367,7 +369,7 @@ class Transformer(nn.Module):
 
         # Decode
         x = self.embed(x)
-        decoded, attentions, values = self.decoder(
+        decoded, hidden_states, attentions, values = self.decoder(
             x, self_attn_mask, save_activations=save_activations
         )
 
@@ -376,4 +378,4 @@ class Transformer(nn.Module):
             decoded = decoded[:, pos, :]
 
         y_hat = self.linear(decoded)
-        return y_hat, attentions, values
+        return y_hat, hidden_states, attentions, values

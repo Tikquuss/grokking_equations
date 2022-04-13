@@ -14,6 +14,7 @@ from functools import reduce
 from typing import Any, Dict, List, Optional, Tuple, Union
 import time
 import pdb
+from unittest import result
 import numpy as np
 from collections import OrderedDict
 
@@ -40,8 +41,17 @@ from grok.data import (
 from grok.transformer import Transformer
 from grok.measure import get_sharpness
 
-DEFAULT_LOG_DIR = "logs"
-WANDB_DIR = "/home/hattie/scratch/wandb/"
+
+def bool_flag(s):
+    """
+    Parse boolean arguments from the command line.
+    """
+    if s.lower() in {'off', 'false', '0'}:
+        return False
+    elif s.lower() in {'on', 'true', '1'}:
+        return True
+    else:
+        raise argparse.ArgumentTypeError("Invalid value for a boolean flag!")
 
 class TrainableTransformer(LightningModule):
     """
@@ -85,16 +95,20 @@ class TrainableTransformer(LightningModule):
         self.next_epoch_to_eval = -1
         self.next_train_epoch_to_log = 0
 
-        ID_params = {"method" : "mle", "k":2, "interval":"epoch"}
-        self.ID, self.per_batch, self.per_epoch = False, False, False
-        if ID_params :
-            self.ID_function = ID_functions[ID_params.pop("method")]
-            interval = ID_params.pop("interval", "epoch")
-            self.ID_params = ID_params
-            self.per_step = interval == "step"
-            self.per_epoch = interval == "epoch"
-            self.ID = True
-            self.ID_interval = 1
+        # Intrinsic dimension params
+        #ID_params = {}
+        ID_params = {"method" : "mle", "k":2, "interval":"epoch", 'attention_weigths_and_values' : False}
+
+        id_funct = ID_functions.get(ID_params.pop("method"), None)
+        #setattr(self.hparams, "ID_function", ID_functions.get(ID_params.pop("method"), None))
+        self.ID_function = id_funct
+        setattr(self.hparams, "ID", id_funct is not None)
+        setattr(self.hparams, "ID_for_attention_weigths_and_values", ID_params.pop("attention_weigths_and_values", False))
+        setattr(self.hparams, "ID_params", ID_params)
+        interval = ID_params.pop("interval", "epoch")
+        setattr(self.hparams, "per_step", interval == "step")
+        setattr(self.hparams, "per_epoch", interval == "epoch")
+        setattr(self.hparams, "ID_interval", 1)
 
     @staticmethod
     def add_model_specific_args(parser: ArgumentParser) -> ArgumentParser:
@@ -124,34 +138,25 @@ class TrainableTransformer(LightningModule):
         parser.add_argument("--max_context_len", type=int, default=50)
 
         parser.add_argument("--math_operator", type=str, default="+")
-        parser.add_argument(
-            "--operand_length",
-            type=int,
-            help="for list operations, the length of the lists",
-        )
+        parser.add_argument("--operand_length", type=int, help="for list operations, the length of the lists")
 
         parser.add_argument("--train_data_pct", type=float, default=5)
         parser.add_argument("--warmup_steps", type=int, default=10)
         parser.add_argument("--anneal_lr_steps", type=int, default=100000)
-        parser.add_argument("--anneal_lr", dest="anneal_lr", action="store_true")
-        parser.set_defaults(anneal_lr=False)
+        parser.add_argument("--anneal_lr", type=bool_flag, default=False)
 
         parser.add_argument("--max_lr", type=float, default=1e-3)
         parser.add_argument("--weight_decay", type=float, default=1)
         parser.add_argument("--weight_decay_kind", type=str, default="to_zero")
         parser.add_argument("--noise_factor", type=float, default=0)
 
-        parser.add_argument(
-            "--save_activations", dest="save_activations", action="store_true"
-        )
-        parser.set_defaults(save_activations=False)
-        parser.add_argument("--save_outputs", dest="save_outputs", action="store_true")
-        parser.set_defaults(save_outputs=False)
+        parser.add_argument("--save_activations", type=bool_flag, default=True)
+        parser.add_argument("--save_outputs", type=bool_flag, default=False)
 
         parser.add_argument(
             "--logdir",
             type=str,
-            default=DEFAULT_LOG_DIR,
+            default="logs",
         )
         parser.add_argument(
             "--datadir",
@@ -159,8 +164,8 @@ class TrainableTransformer(LightningModule):
             default=DEFAULT_DATA_DIR,
         )
         
-        parser.add_argument("--save_checkpoint", action="store_true")     
-        parser.add_argument("--use_wandb", action="store_true")     
+        parser.add_argument("--save_checkpoint", type=bool_flag, default=True)     
+        parser.add_argument("--use_wandb", type=bool_flag, default=True)     
         parser.add_argument("--group_name", type=str, default="base")
         parser.add_argument("--load_from_ckpt", type=str, default=None)
         parser.add_argument("--opt", type=str, default="adamw", choices=("sgd", "adamw"))
@@ -335,6 +340,7 @@ class TrainableTransformer(LightningModule):
                   The fraction of this dataset contained in this batch
                   The portion of the input equations left of the equal sign
                   The softmax probabilities for the solutions to the equations
+                  A list lists of hidden states by layer (including embedding layer)
                   A list lists of attention matrices by layer and head
                   A list lists of value matrices by layer and head
                   Margin for this batch
@@ -342,7 +348,7 @@ class TrainableTransformer(LightningModule):
         x = batch["text"]  # shape = batchsize * context_len
         y = batch["target"]  # shape = batchsize * context_len
         y_hat, hidden_states, attentions, values = self(
-            x=x, save_activations=self.hparams.save_activations  # type: ignore
+            x=x, save_activations=self.hparams.save_activations or self.hparams.ID_for_attention_weigths_and_values  # type: ignore
         )  # shape = batchsize * context_len * vocab_size
         y_hat = y_hat.transpose(-2, -1)  # shape = batchsize * vocab_size * context_len
 
@@ -480,22 +486,46 @@ class TrainableTransformer(LightningModule):
             pickle_file = logdir + f"/epoch_{self.current_epoch:010}.pt"
             with open(pickle_file, "wb") as fh:
                 torch.save(output, fh)
+        return output.get("attentions", None), output.get("values", None)
 
     def _group_hidden_states(self, outputs):
-        # hidden_states : (nlayers+1)x(batch_size, seq_len, dim)
+        """
+        Merges the hidden states from all batches in this epoch.
+
+        :param partial_activations: A list of (lists of hidden states by layer)
+        :returns: A lists hiddens states by layer
+
+        hidden_states : (nlayers+1)x(batch_size, seq_len, dim)
+        """ 
         hidden_states = [
-            torch.cat([output["hidden_states"][l] for output in outputs], dim=0) 
+            torch.cat([output["hidden_states"][l] for output in outputs], dim=0) # (batch_size, seq_len, dim)
             for l in range(len(outputs[0]["hidden_states"]))
         ]
         return hidden_states
 
-    def intrinsic_dimension(self, output, hidden_states, prefix):
-        """hidden_states : (nlayers+1)x(batch_size, seq_len, dim)"""
+    def intrinsic_dimension(self, outputs, prefix, attentions = None, values = None):
+        """
+        Estimate intrinsic dimensions using all hidden states collected across one epoch
+        hidden_states : (nlayers+1)x(batch_size, seq_len, dim)
+        
+        """
+        result = {}
+        hidden_states = self._group_hidden_states(outputs)
+        batch_size = hidden_states[0].size(0)
         for l in range(len(hidden_states)): 
             h = hidden_states[l] # (batch_size, seq_len, dim)
-            h = h.view(h.size(0), -1) # (batch_size, seq_len*dim)
-            output[f"{prefix}ID_layer_{l}"] = self.ID_function(data=h, **self.ID_params)
-        return output
+            h = h.view(batch_size, -1) # (batch_size, seq_len*dim)
+            result[f"{prefix}ID_layer_{l}"] = self.ID_function(data=h, **self.hparams.ID_params)
+        if self.hparams.ID_for_attention_weigths_and_values:
+            if attentions is None : attentions = self._merge_batch_activations(list([o["partial_attentions"] for o in outputs]))
+            if values is None : values = self._merge_batch_activations(list([o["partial_values"] for o in outputs]))
+            num_layers = len(attentions)
+            num_heads = len(attentions[0])
+            for l in range(num_layers):
+                for h in range(num_heads):
+                    result[f"{prefix}ID_attn_layer_{l}_{h}"] = self.ID_function(data=attentions[l][h].view(batch_size, -1), **self.hparams.ID_params)
+                    result[f"{prefix}ID_val_layer_{l}_{h}"] = self.ID_function(data=values[l][h].view(batch_size, -1), **self.hparams.ID_params)            
+        return result
 
     def training_step(self, batch, batch_idx):
         """
@@ -504,7 +534,7 @@ class TrainableTransformer(LightningModule):
 
         :param batch: The batch of equations to process
         :param batch_idx: which batch this is in the epoch.
-        :returns: a dict with loss, accuracy, lr, probabilities of solutions,
+        :returns: a dict with loss, accuracy, lr, probabilities of solutions, hidden states,
                   attentions, and values
         """
         # print(batch_idx)
@@ -530,9 +560,9 @@ class TrainableTransformer(LightningModule):
             "partial_train_accuracy": coeff * accuracy,
             "learning_rate": torch.tensor([lr]),
             "y_hat_rhs": y_hat_rhs,
+            "hidden_states" : hidden_states,
             "partial_attentions": attentions,
-            "partial_values": values,
-            "hidden_states" : hidden_states
+            "partial_values": values
         }
 
         if self.current_epoch == 0:
@@ -547,7 +577,7 @@ class TrainableTransformer(LightningModule):
 
         :param outputs: a list of dicts from self.training_step()
         :param batch_idx: which batch this is in the epoch.
-        :returns: a dict with loss, accuracy, lr, probabilities of solutions,
+        :returns: a dict with loss, accuracy, lr, probabilities of solutions, hidden states,
                   attentions, and values
         """
         epoch_is_to_be_logged = self.current_epoch == self.next_train_epoch_to_log
@@ -574,16 +604,15 @@ class TrainableTransformer(LightningModule):
             # last_lr = outputs[-1]["learning_rate"]
             first_lr = outputs[0]["learning_rate"]
 
+            attentions, values = None, None
             if self.hparams.save_activations or self.hparams.save_outputs or self.hparams.save_checkpoint:
                 if self.current_epoch == 0:
                     self._save_inputs(outputs, ds="train")
                 if self.hparams.save_activations or self.hparams.save_outputs:
-                    self._save_activations(outputs, ds="train")
+                    attentions, values = self._save_activations(outputs, ds="train")
             
             id_output = {}
-            if self.ID :
-                hidden_states = self._group_hidden_states(outputs) 
-                id_output = self.intrinsic_dimension({}, hidden_states, prefix="train_")
+            if self.hparams.ID : id_output = self.intrinsic_dimension(outputs, "train_", attentions, values)
 
             logs = {
                 "train_loss": loss,
@@ -660,16 +689,15 @@ class TrainableTransformer(LightningModule):
             perplexity = torch.exp(loss)
             accuracy = torch.stack([x["partial_val_accuracy"] for x in outputs]).sum()
 
+            attentions, values = None, None
             if self.hparams.save_activations or self.hparams.save_outputs or self.hparams.save_checkpoint:
                 if self.current_epoch == 0:
                     self._save_inputs(outputs, ds="val")
                 if self.hparams.save_activations or self.hparams.save_outputs:
-                    self._save_activations(outputs, ds="val")
+                    attentions, values = self._save_activations(outputs, ds="val")
 
             id_output = {}
-            if self.ID :
-                hidden_states = self._group_hidden_states(outputs) 
-                id_output = self.intrinsic_dimension({}, hidden_states, prefix="val_")
+            if self.hparams.ID : id_output = self.intrinsic_dimension(outputs, "val_", attentions, values)
 
             logs = {
                 "val_loss": loss,
@@ -763,9 +791,7 @@ class TrainableTransformer(LightningModule):
         accuracy = torch.cat([x["partial_test_accuracy"] for x in outputs], dim=0)
 
         id_output = {}
-        # if self.ID :
-        #     hidden_states = self._group_hidden_states(outputs) 
-        #     id_output = self.intrinsic_dimension({}, hidden_states, prefix="test_")
+        # if self.hparams.ID : id_output = self.intrinsic_dimension(outputs, prefix="test_")
 
         logs = {
             "test_loss": loss,
@@ -800,9 +826,13 @@ def train(hparams: Namespace) -> None:
         group_name = ''
         for var in group_vars:
             group_name = group_name + '_' + var + str(getattr(hparams, var))
-        wandb.init(project="grok_phase",
-               group=hparams.group_name,
-               name=group_name)
+        wandb.init(
+            project="grokking_phase_transition",
+            entity="grokking_ppsp",
+            group=hparams.group_name,
+            #name=group_name, # too_long_for_that
+            notes=group_name
+        )
         for var in group_vars:
             wandb.config.update({var:getattr(hparams, var)})        
 
@@ -961,7 +991,7 @@ def compute_sharpness(hparams: Namespace, ckpts) -> None:
         phi = get_sharpness(model.train_dataloader(), model)
         results = {}
         results[ckpt] = phi
-        pickle.dump(results, open(f"results/results_SD-{i}.pkl", "wb"))
+        pickle.dump(results, open(f"results/results_SD-{ckpt}.pkl", "wb"))
 
 
 def add_args(parser=None) -> Namespace:

@@ -8,7 +8,7 @@ opt=${5-adamw}
 max_lr=${6-0.001}
 random_seed=${7-0}
 use_wandb=True
-group_name="${math_operator}-${weight_decay}-${dropout}-${opt}-${max_lr}-${random_seed}-${use_wandb}-${group_name}"
+group_name="wd=${weight_decay}-d=${dropout}-opt=${opt}-mlr=${max_lr}-rs=${random_seed}-mo${math_operator}"
 
 ./scripts/train.py \
 		--batchsize 0 \

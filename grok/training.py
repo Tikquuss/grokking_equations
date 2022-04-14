@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import argparse
 import copy
@@ -888,8 +888,9 @@ def train(hparams: Namespace) -> None:
         "log_every_n_steps": 1,
         "flush_logs_every_n_steps": 1000,
     }
-    if torch.cuda.is_available() and hparams.gpu >= 0:
-        trainer_args["gpus"] = [hparams.gpu]
+    if hparams.use_cuda :
+        if torch.cuda.is_available() and hparams.gpu >= 0:
+            trainer_args["gpus"] = [hparams.gpu]
     
     trainer = Trainer(**trainer_args) #, progress_bar_refresh_rate=0
 
@@ -965,10 +966,11 @@ def compute_sharpness(hparams: Namespace, ckpts) -> None:
         # "checkpoint_callback": checkpointer,
         "logger": logger,
         "log_every_n_steps": 1,
-        "flush_logs_every_n_steps": 1000,
+        "flush_logs_every_n_steps": 1000
     }
-    if torch.cuda.is_available() and hparams.gpu >= 0:
-        trainer_args["gpus"] = [hparams.gpu]
+    if hparams.use_cuda :
+        if torch.cuda.is_available() and hparams.gpu >= 0:
+            trainer_args["gpus"] = [hparams.gpu]
 
     trainer = Trainer(**trainer_args)
 
@@ -1006,6 +1008,7 @@ def add_args(parser=None) -> Namespace:
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--max_epochs", type=int, default=None)
     parser.add_argument("--max_steps", type=int, default=100000)
+    parser.add_argument("--use_cuda", type=bool_flag, default=True)
     # parser.add_argument("--checkpoint_period", type=int, default=1)
     parser = TrainableTransformer.add_model_specific_args(parser)
     return parser

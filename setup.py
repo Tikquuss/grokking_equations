@@ -14,6 +14,7 @@ setup(
         "mod",
         "matplotlib",
         "intrinsics-dimension",
-        "wandb"
+        "wandb",
+        "sympy"
     ],
 )

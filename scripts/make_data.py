@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 from argparse import ArgumentParser
 from grok.data import create_data_files, DEFAULT_DATA_DIR

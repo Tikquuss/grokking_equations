@@ -10,6 +10,9 @@ random_seed=${7-0}
 use_wandb=True
 group_name="wd=${weight_decay}-d=${dropout}-opt=${opt}-mlr=${max_lr}-rs=${random_seed}-mo${math_operator}"
 
+logdir=logs/$group_name
+datadir=data/$group_name
+
 ./scripts/train.py \
 		--batchsize 0 \
 		--n_layers 2 \
@@ -30,8 +33,8 @@ group_name="wd=${weight_decay}-d=${dropout}-opt=${opt}-mlr=${max_lr}-rs=${random
 		--noise_factor 0 \
 		--save_activations False \
 		--save_outputs False \
-		--logdir logs \
-		--datadir data \
+		--logdir $logdir \
+		--datadir $datadir \
 		--save_checkpoint True \
 		--use_wandb $use_wandb \
 		--group_name $group_name \
@@ -39,6 +42,7 @@ group_name="wd=${weight_decay}-d=${dropout}-opt=${opt}-mlr=${max_lr}-rs=${random
 		--momentum 0.9 \
 		--random_seed $random_seed \
 		--max_steps 100000 \
+		--use_cuda True \
 #		--load_from_ckpt None \
 #		--operand_length \
 #		--max_epochs 1e9 \

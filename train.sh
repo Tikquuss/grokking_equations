@@ -10,8 +10,8 @@ random_seed=${7-0}
 use_wandb=True
 group_name="wd=${weight_decay}-d=${dropout}-opt=${opt}-mlr=${max_lr}-rs=${random_seed}-mo${math_operator}"
 
-logdir=logs/$group_name
-datadir=data/$group_name
+logdir=../logs/$group_name
+datadir=../data/$group_name
 
 ./scripts/train.py \
 		--batchsize 0 \

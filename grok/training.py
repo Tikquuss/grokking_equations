@@ -831,7 +831,8 @@ def train(hparams: Namespace) -> None:
             entity="grokking_ppsp",
             group=hparams.group_name,
             #name=group_name, # too_long_for_that
-            notes=group_name
+            notes=group_name,
+            #resume=True
         )
         for var in group_vars:
             wandb.config.update({var:getattr(hparams, var)})        
@@ -894,7 +895,9 @@ def train(hparams: Namespace) -> None:
     
     trainer = Trainer(**trainer_args) #, progress_bar_refresh_rate=0
 
-    trainer.fit(model=model)  # type: ignore
+    hparams.load_from_ckpt is not None
+
+    trainer.fit(model=model, ckpt_path=hparams.load_from_ckpt if hparams.load_from_ckpt is not None else None)  # type: ignore
     """
     margin = np.percentile(model.margin.detach().cpu().numpy(), 5)
     device = transformer.embedding.weight.device

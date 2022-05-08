@@ -6,9 +6,10 @@ setup(
     version="0.0.1",
     install_requires=[
         "pytorch_lightning==1.5",
+        "torch==1.11.0",
+        "torchtext<0.12.0", # to avoid `No module named 'torchtext.legacy'` with `import pytorch_lightning as plt`
         "blobfile",
         "numpy",
-        "torch",
         "tqdm",
         "scipy",
         "mod",

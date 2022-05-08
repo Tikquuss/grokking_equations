@@ -165,13 +165,18 @@ class TrainableTransformer(LightningModule):
         )
         
         parser.add_argument("--save_checkpoint", type=bool_flag, default=True)     
-        parser.add_argument("--use_wandb", type=bool_flag, default=True)     
-        parser.add_argument("--group_name", type=str, default="base")
+             
         parser.add_argument("--load_from_ckpt", type=str, default=None)
         parser.add_argument("--opt", type=str, default="adamw", choices=("sgd", "adamw"))
         parser.add_argument("--momentum", type=float, default=0.9)
-        return parser
 
+        # wandb
+        parser.add_argument("--use_wandb", type=bool_flag, default=True)
+        parser.add_argument("--group_name", type=str, default="base")
+        parser.add_argument("--wandb_entity", type=str, default=None, help="name of the team on wandb and is optional")
+        parser.add_argument("--wandb_project", type=str, default=None, help="name of the project")
+
+        return parser
 
     def load_pretrained_state_dict(self, state_dict):
         own_state = self.state_dict()
@@ -523,8 +528,8 @@ class TrainableTransformer(LightningModule):
             num_heads = len(attentions[0])
             for l in range(num_layers):
                 for h in range(num_heads):
-                    result[f"{prefix}ID_attn_layer_{l}_{h}"] = self.ID_function(data=attentions[l][h].view(batch_size, -1), **self.hparams.ID_params)
-                    result[f"{prefix}ID_val_layer_{l}_{h}"] = self.ID_function(data=values[l][h].view(batch_size, -1), **self.hparams.ID_params)            
+                    result[f"{prefix}ID_attn_layer_{l}_head_{h}"] = self.ID_function(data=attentions[l][h].view(batch_size, -1), **self.hparams.ID_params)
+                    result[f"{prefix}ID_value_layer_{l}_head_{h}"] = self.ID_function(data=values[l][h].view(batch_size, -1), **self.hparams.ID_params)            
         return result
 
     def training_step(self, batch, batch_idx):
@@ -827,8 +832,8 @@ def train(hparams: Namespace) -> None:
         for var in group_vars:
             group_name = group_name + '_' + var + str(getattr(hparams, var))
         wandb.init(
-            project="grokking_phase_transition",
-            entity="grokking_ppsp",
+            project=hparams.wandb_project,
+            entity=hparams.wandb_entity,
             group=hparams.group_name,
             #name=group_name, # too_long_for_that
             notes=group_name,
@@ -889,13 +894,10 @@ def train(hparams: Namespace) -> None:
         "log_every_n_steps": 1,
         "flush_logs_every_n_steps": 1000,
     }
-    if hparams.use_cuda :
-        if torch.cuda.is_available() and hparams.gpu >= 0:
-            trainer_args["gpus"] = [hparams.gpu]
+    if hparams.use_cuda and torch.cuda.is_available() :
+        trainer_args["gpus"] = [hparams.gpu] if hparams.gpu >= 0 else -1
     
     trainer = Trainer(**trainer_args) #, progress_bar_refresh_rate=0
-
-    hparams.load_from_ckpt is not None
 
     trainer.fit(model=model, ckpt_path=hparams.load_from_ckpt if hparams.load_from_ckpt is not None else None)  # type: ignore
     """
@@ -971,9 +973,9 @@ def compute_sharpness(hparams: Namespace, ckpts) -> None:
         "log_every_n_steps": 1,
         "flush_logs_every_n_steps": 1000
     }
-    if hparams.use_cuda :
-        if torch.cuda.is_available() and hparams.gpu >= 0:
-            trainer_args["gpus"] = [hparams.gpu]
+
+    if hparams.use_cuda and torch.cuda.is_available() :
+        trainer_args["gpus"] = [hparams.gpu] if hparams.gpu >= 0 else -1
 
     trainer = Trainer(**trainer_args)
 

@@ -606,11 +606,12 @@ class TrainableTransformer(LightningModule):
         epoch_is_to_be_logged = self.current_epoch == self.next_train_epoch_to_log
         if epoch_is_to_be_logged:
             # self.next_train_epoch_to_log = self.next_train_epoch_to_log + 1 #temporary!
-
-            self.next_train_epoch_to_log = max(
-                int(1.01 * self.next_train_epoch_to_log),
-                self.next_train_epoch_to_log + 1,
-            )
+            self.next_train_epoch_to_log = self.next_train_epoch_to_log + 2
+            # self.next_train_epoch_to_log = max(
+            #     int(1.01 * self.next_train_epoch_to_log),
+            #     self.next_train_epoch_to_log + 1,
+            # )
+            
             with torch.no_grad():
                 try:
                     loss = torch.stack([x["partial_train_loss"] for x in outputs]).sum()
@@ -701,7 +702,8 @@ class TrainableTransformer(LightningModule):
         :param batch_idx: which batch this is in the epoch.
         :returns: a dict with val_loss, val_accuracy
         """
-        validation_is_real = len(outputs[0]) != 0
+        try : validation_is_real = len(outputs[0]) != 0
+        except IndexError : validation_is_real = False
 
         if validation_is_real:
             self.next_epoch_to_eval = self.next_epoch_to_eval + 1 #temporary!!

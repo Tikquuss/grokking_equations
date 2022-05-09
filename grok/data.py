@@ -156,13 +156,13 @@ class ArithmeticDataset:
 
         ds_name = cls.get_dsname(operator, operand_length)
         eqs = cls.make_data(operator, operand_length)
-
-        train_rows, _ = cls.calc_split_len(train_pct, len(eqs))
+        base_length = len(eqs)
+        train_rows, _ = cls.calc_split_len(train_pct, base_length)
 
         train_ds = cls(ds_name, eqs[:train_rows], train=True, data_dir=data_dir)
         val_ds = cls(ds_name, eqs[train_rows:], train=False, data_dir=data_dir)
 
-        return train_ds, val_ds
+        return train_ds, val_ds, base_length
 
     @classmethod
     def calc_split_len(cls, train_pct, ds_len):

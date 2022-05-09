@@ -27,7 +27,7 @@ ID_functions = {"twonn" : twonn_pytorch, "mle" : mle_id}
 import torch
 import torch.nn.functional as F
 from pytorch_lightning import LightningModule, Trainer
-from pytorch_lightning.callbacks import Callback, ModelCheckpoint
+from pytorch_lightning.callbacks import Callback, ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import CSVLogger
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
@@ -112,6 +112,11 @@ class TrainableTransformer(LightningModule):
         setattr(self.hparams, "per_epoch", interval == "epoch")
         setattr(self.hparams, "ID_interval", 1)
 
+
+        # Early stopping
+        self.is_grokking = False
+        self.early_stopping_step = 0
+
     @staticmethod
     def add_model_specific_args(parser: ArgumentParser) -> ArgumentParser:
         """
@@ -178,6 +183,12 @@ class TrainableTransformer(LightningModule):
         parser.add_argument("--wandb_entity", type=str, default=None, help="name of the team on wandb and is optional")
         parser.add_argument("--wandb_project", type=str, default=None, help="name of the project")
 
+        # Early stopping
+        parser.add_argument("--early_stopping_patience", type=int, default=1e9)
+        parser.add_argument("--patience_metric", type=str, default="val_accuracy", 
+                help="train_loss, train_accuracy, train_perplexity, val_loss, val_accuracy, val_perplexity, ...")
+        parser.add_argument("--early_stopping_step_val_acc_threshold", type=float, default=90.0)
+
         return parser
 
     def load_pretrained_state_dict(self, state_dict):
@@ -196,7 +207,7 @@ class TrainableTransformer(LightningModule):
         Loads training data to self.train_dataset
         Loads validation data to self.val_dataset
         """
-        (self.train_dataset, self.val_dataset,) = ArithmeticDataset.splits(
+        self.train_dataset, self.val_dataset, self.base_length = ArithmeticDataset.splits(
             train_pct=self.hparams.train_data_pct,  # type: ignore
             operator=self.hparams.math_operator,  # type: ignore
             operand_length=self.hparams.operand_length,  # type: ignore
@@ -635,6 +646,8 @@ class TrainableTransformer(LightningModule):
                 "batches_per_epoch_train": self.batches_per_epoch_train,
                 "time_per_epoch": time.time() - self.training_epoch_start_time,
                 "fwd_time_in_epoch": self.fwd_time_in_epoch,
+
+                "early_stopping_step" : self.early_stopping_step
             }
             logs = {**id_output, **logs}
 
@@ -709,11 +722,15 @@ class TrainableTransformer(LightningModule):
 
             id_output = {}
             if self.hparams.ID : id_output = self.intrinsic_dimension(outputs, "val_", attentions, values)
+            
+            self.is_grokking = self.is_grokking or accuracy >= self.hparams.early_stopping_step_val_acc_threshold
+            if self.is_grokking : self.early_stopping_step+=1
 
             logs = {
                 "val_loss": loss,
                 "val_accuracy": accuracy,
                 "val_perplexity": perplexity,
+                "early_stopping_step" : self.early_stopping_step
             }
             logs = {**id_output, **logs}
 
@@ -731,7 +748,7 @@ class TrainableTransformer(LightningModule):
                 
             if self.hparams.use_wandb:
                 db_data = {"epoch": self.current_epoch, "val loss": loss.detach(), "val accuracy": accuracy,
-                           "full train acc": tr_acc, "full train loss": tr_loss}
+                           "full train acc": tr_acc, "full train loss": tr_loss, "early_stopping_step" : self.early_stopping_step}
                 db_data = {**db_data, **id_output}
                 wandb.log(db_data)
 
@@ -824,6 +841,8 @@ class TrainableTransformer(LightningModule):
     def on_train_start(self):
         if self.hparams.use_wandb:
             db_data = {
+                "base_length" : self.base_length,
+
                 "train_batchsize" : self.train_batchsize,
                 "batches_per_epoch_train" : self.batches_per_epoch_train,
                 "len_train_data": len(self.train_dataset),
@@ -854,6 +873,12 @@ class TrainableTransformer(LightningModule):
 
     def on_train_end(self) :
         pass
+
+class StopTrainingCallback(Callback):
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if pl_module.early_stopping_step >= pl_module.hparams.early_stopping_patience :
+            #exit()
+            raise KeyboardInterrupt
 
 def train(hparams: Namespace) -> None:
     """
@@ -936,6 +961,45 @@ def train(hparams: Namespace) -> None:
     if hparams.use_cuda and torch.cuda.is_available() :
         trainer_args["gpus"] = [hparams.gpu] if hparams.gpu >= 0 else -1
     
+    trainer_args["callbacks"] = [] 
+
+    # early_stopping_callback1 = EarlyStopping(
+    #     patience = hparams.early_stopping_patience, 
+    #     monitor = hparams.patience_metric, 
+    #     mode = (lambda s : "min" if 'loss' in s or 'perplexity' in s else 'max')(hparams.patience_metric),
+    #     # Stop training as soon as the monitored quantity becomes worse than this threshold.
+    #     # divergence_threshold = 100.0,
+    #     verbose=False, strict=False, 
+    #     check_on_train_epoch_end = True if 'train' in hparams.patience_metric else False
+    # )
+    # trainer_args["callbacks"].append(early_stopping_callback1)
+
+    # # As soon as there is grokking, `early_stopping_step` increments by 1 after each epoch. 
+    # # This callback will stop the training `early_stopping_patience` epochs after the grokking. 
+    # early_stopping_callback2 = EarlyStopping(
+    #     #patience = 1000, 
+    #     patience = hparams.early_stopping_patience, 
+    #     monitor = "early_stopping_step", 
+    #     # Stop training immediately once the monitored quantity reaches this threshold.
+    #     stopping_threshold = hparams.early_stopping_patience,
+    #     mode ='max', verbose=False, strict=True, check_on_train_epoch_end = True
+    # )
+    # trainer_args["callbacks"].append(early_stopping_callback2)
+
+    trainer_args["callbacks"].append(StopTrainingCallback())
+
+    # save_top_k = 5
+    # validation_metric = "val_acc"
+    # root_dir = hparams.logdir
+    # model_checkpoint_callback = ModelCheckpoint(
+    #         dirpath=root_dir,
+    #         filename="{epoch}-{%s:.4f}"%validation_metric,
+    #         monitor=validation_metric,
+    #         save_top_k=save_top_k,
+    #         mode = (lambda s : "min" if 'loss' in s else 'max')(validation_metric),
+    # )
+    # trainer_args["callbacks"].append(model_checkpoint_callback)
+
     trainer = Trainer(**trainer_args) #, progress_bar_refresh_rate=0
 
     trainer.fit(model=model, ckpt_path=hparams.load_from_ckpt if hparams.load_from_ckpt is not None else None)  # type: ignore

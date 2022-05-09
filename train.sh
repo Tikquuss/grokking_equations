@@ -32,7 +32,7 @@ logdir=${dump_path}/logs/$group_name
 datadir=${dump_path}/data/$group_name
 
 ### Early_stopping ###
-early_stopping_patience=1000
+early_stopping_patience=5000
 patience_metric=val_accuracy
 early_stopping_step_val_acc_threshold=90.0
 
@@ -51,7 +51,7 @@ early_stopping_step_val_acc_threshold=90.0
 		--warmup_steps 10 \
 		--anneal_lr_steps 100000 \
 		--anneal_lr False \
-		--max_lr 0.001 \
+		--max_lr $max_lr \
 		--weight_decay $weight_decay \
 		--weight_decay_kind to_zero \
 		--noise_factor 0 \

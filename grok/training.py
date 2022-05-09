@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import pdb
+from re import T
 import sys
 import pickle
 from argparse import ArgumentParser, Namespace
@@ -970,7 +971,12 @@ def train(hparams: Namespace) -> None:
         "flush_logs_every_n_steps": 1000,
     }
     if hparams.use_cuda and torch.cuda.is_available() :
-        trainer_args["gpus"] = [hparams.gpu] if hparams.gpu >= 0 else -1
+        #trainer_args["gpus"] = [hparams.gpu] if hparams.gpu >= 0 else -1
+        if hparams.gpu == "-1" : trainer_args["gpus"] = -1
+        else :
+            tmp = list(set([int(x) for x in hparams.gpu.split(',')]))
+            assert all([x >= 0  for x in tmp])
+            trainer_args["gpus"] = tmp
     
     trainer_args["callbacks"] = [] 
 
@@ -1089,7 +1095,12 @@ def compute_sharpness(hparams: Namespace, ckpts) -> None:
     }
 
     if hparams.use_cuda and torch.cuda.is_available() :
-        trainer_args["gpus"] = [hparams.gpu] if hparams.gpu >= 0 else -1
+        #trainer_args["gpus"] = [hparams.gpu] if hparams.gpu >= 0 else -1
+        if hparams.gpu == "-1" : trainer_args["gpus"] = -1
+        else :
+            tmp = list(set([int(x) for x in hparams.gpu.split(',')]))
+            assert all([x >= 0  for x in tmp])
+            trainer_args["gpus"] = tmp
 
     trainer = Trainer(**trainer_args)
 
@@ -1124,7 +1135,8 @@ def add_args(parser=None) -> Namespace:
     if parser is None:
         parser = ArgumentParser()
     parser.add_argument("--random_seed", type=int, default=-1)
-    parser.add_argument("--gpu", type=int, default=0)
+    #parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--gpu", type=str, default="-1")
     parser.add_argument("--max_epochs", type=int, default=None)
     parser.add_argument("--max_steps", type=int, default=100000)
     parser.add_argument("--use_cuda", type=bool_flag, default=True)

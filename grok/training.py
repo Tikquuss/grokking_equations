@@ -880,15 +880,7 @@ class StopTrainingCallback(Callback):
             #exit()
             raise KeyboardInterrupt
 
-def train(hparams: Namespace) -> None:
-    """
-    This is the main trainer_method. This sets up and runs experiment with
-    the defined hyperparameters
-
-    :param hparams: An argparse.Namespace with all of the relevant hyperparameters
-    """
-    
-    # set up wandb
+def init_wandb(hparams):
     if hparams.use_wandb:
         group_vars = ["d_model", "n_heads", "random_seed", "max_steps", "max_epochs", "n_layers", "dropout", "max_context_len", "weight_noise", "train_data_pct", "math_operator", "operand_length", "weight_decay", "noise_factor", "weight_decay_kind", "batchsize", "max_lr", "warmup_steps", "anneal_lr", "anneal_lr_steps", "opt", "momentum"]
 
@@ -904,7 +896,18 @@ def train(hparams: Namespace) -> None:
             #resume=True
         )
         for var in group_vars:
-            wandb.config.update({var:getattr(hparams, var)})        
+            wandb.config.update({var:getattr(hparams, var)})  
+
+def train(hparams: Namespace) -> None:
+    """
+    This is the main trainer_method. This sets up and runs experiment with
+    the defined hyperparameters
+
+    :param hparams: An argparse.Namespace with all of the relevant hyperparameters
+    """
+    
+    # set up wandb
+    init_wandb(hparams)     
 
     # Process the args
     if hparams.logdir is None:

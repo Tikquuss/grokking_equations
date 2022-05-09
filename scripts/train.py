@@ -37,15 +37,17 @@ import os
 --max_steps 100000
 """
 
-parser = grok.training.add_args()
-parser.set_defaults(logdir=os.environ.get("GROK_LOGDIR", "."))
-hparams = parser.parse_args()
-hparams.datadir = os.path.abspath(hparams.datadir)
-hparams.logdir = os.path.abspath(hparams.logdir)
+# Take a look here (😂😂) : https://github.com/PyTorchLightning/pytorch-lightning/discussions/151#discussioncomment-238025
+if __name__ == '__main__':
+    parser = grok.training.add_args()
+    parser.set_defaults(logdir=os.environ.get("GROK_LOGDIR", "."))
+    hparams = parser.parse_args()
+    hparams.datadir = os.path.abspath(hparams.datadir)
+    hparams.logdir = os.path.abspath(hparams.logdir)
 
-#print(hparams)
-print("*"*10, "\thparams\t", "*"*10)
-for k, v in vars(hparams).items() :
-    print(k, v)
-print("*"*(10+11+10))
-print(grok.training.train(hparams))
+    #print(hparams)
+    print("*"*10, "\thparams\t", "*"*10)
+    for k, v in vars(hparams).items() :
+        print(k, v)
+    print("*"*(10+11+10))
+    print(grok.training.train(hparams))

@@ -1,6 +1,10 @@
 #!/bin/bash
 
+### usage ###
 # . train.sh $train_data_pct $math_operator $weight_decay $dropout $opt $max_lr $random_seed $use_wandb $group_name
+# all this parameters are optional (see the default values below)
+#############
+
 train_data_pct=${1-5}
 math_operator=${2-+}
 weight_decay=${3-1}
@@ -9,11 +13,12 @@ opt=${5-adamw}
 max_lr=${6-0.001}
 random_seed=${7-0}
 
-# wandb 
 # wandb_entity is the name of the team on wandb and is optional
 # wandb_project is the name of the project
 use_wandb=True
-group_name="tdp=${train_data_pct}-wd=${weight_decay}-d=${dropout}-opt=${opt}-mlr=${max_lr}-rs=${random_seed}-mo${math_operator}"
+#group_name="tdp=${train_data_pct}-wd=${weight_decay}-d=${dropout}-opt=${opt}-mlr=${max_lr}-rs=${random_seed}-mo${math_operator}"
+# remove random_seed in group_name
+group_name="tdp=${train_data_pct}-wd=${weight_decay}-d=${dropout}-opt=${opt}-mlr=${max_lr}-mo${math_operator}"
 wandb_entity="grokking_ppsp"
 wandb_project="grokking_phase_transition"
 

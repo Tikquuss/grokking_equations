@@ -18,6 +18,8 @@ from unittest import result
 import numpy as np
 from collections import OrderedDict
 
+import matplotlib.pyplot as plt
+
 import wandb
 from intrinsics_dimension import mle_id, twonn_pytorch
 ID_functions = {"twonn" : twonn_pytorch, "mle" : mle_id}
@@ -214,7 +216,7 @@ class TrainableTransformer(LightningModule):
             batchsize_hint=self.hparams.batchsize,  # type: ignore
         )
         self.train_batchsize = iterator.batchsize
-        self.batches_per_epoch = len(iterator)
+        self.batches_per_epoch_train = len(iterator)
 
         return iterator
 
@@ -230,6 +232,8 @@ class TrainableTransformer(LightningModule):
             device,
             batchsize_hint=-1,  # no need to batch validation data
         )
+        self.val_batchsize = iterator.batchsize
+        self.batches_per_epoch_val = len(iterator)
         return iterator
 
     def test_dataloader(self) -> ArithmeticIterator:  # type: ignore
@@ -242,6 +246,8 @@ class TrainableTransformer(LightningModule):
         iterator = ArithmeticIterator(
             self.val_dataset, device, batchsize_hint=-1  # type: ignore
         )
+        self.test_batchsize = iterator.batchsize
+        self.batches_per_epoch_test = len(iterator)
         return iterator
 
     def _scheduler_lr(self, step: int) -> float:
@@ -626,7 +632,7 @@ class TrainableTransformer(LightningModule):
                 "learning_rate": first_lr,
                 "len_train_ds": len(self.train_dataset),
                 "len_val_ds": len(self.val_dataset),
-                "batches_per_epoch": self.batches_per_epoch,
+                "batches_per_epoch_train": self.batches_per_epoch_train,
                 "time_per_epoch": time.time() - self.training_epoch_start_time,
                 "fwd_time_in_epoch": self.fwd_time_in_epoch,
             }
@@ -815,6 +821,39 @@ class TrainableTransformer(LightningModule):
         """Passes all arguments directly to Tranformer.forward()"""
         return self.transformer(*args, **kwargs)
 
+    def on_train_start(self):
+        if self.hparams.use_wandb:
+            db_data = {
+                "train_batchsize" : self.train_batchsize,
+                "batches_per_epoch_train" : self.batches_per_epoch_train,
+                "len_train_data": len(self.train_dataset),
+                
+
+                "val_batchsize" : self.val_batchsize,
+                "batches_per_epoch_val" : self.batches_per_epoch_val,
+                "len_val_data": len(self.val_dataset),
+
+                #"test_batchsize" : self.test_batchsize,
+                #"batches_per_epoch_test" : self.batches_per_epoch_test,
+                #"len_test_data": None,
+            }   
+            #wandb.log(db_data)
+
+            # fig, ax = plt.subplots(figsize=(4*4,1*4))
+            # #x = db_data.keys()
+            # x = [f'{k}={v}' for k, v in db_data.items() ]
+            # y = db_data.values()
+            # ax.bar(x, y)
+            # wandb.log({"data_info": fig})
+
+            labels = db_data.keys()
+            values = db_data.values()
+            data = [[label, val] for (label, val) in zip(labels, values)]
+            table = wandb.Table(data=data, columns = ["label", "value"])
+            wandb.log({"data_info" : wandb.plot.bar(table, "label", "value", title="Dataset Informations")})
+
+    def on_train_end(self) :
+        pass
 
 def train(hparams: Namespace) -> None:
     """

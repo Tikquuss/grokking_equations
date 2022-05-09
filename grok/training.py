@@ -10,7 +10,6 @@ import pdb
 import sys
 import pickle
 from argparse import ArgumentParser, Namespace
-from functools import reduce
 from typing import Any, Dict, List, Optional, Tuple, Union
 import time
 import pdb
@@ -43,6 +42,7 @@ from grok.data import (
 from grok.transformer import Transformer
 from grok.measure import get_sharpness
 
+wandb_id = None
 
 def bool_flag(s):
     """
@@ -750,7 +750,11 @@ class TrainableTransformer(LightningModule):
                 db_data = {"epoch": self.current_epoch, "val loss": loss.detach(), "val accuracy": accuracy,
                            "full train acc": tr_acc, "full train loss": tr_loss, "early_stopping_step" : self.early_stopping_step}
                 db_data = {**db_data, **id_output}
-                wandb.log(db_data)
+                try :
+                    wandb.log(db_data)
+                except :
+                    init_wandb(self.hparams, resume=False)
+                    wandb.log(db_data)
 
         # save a checkpoint if the epoch is a power of 2
         # if (
@@ -880,21 +884,25 @@ class StopTrainingCallback(Callback):
             #exit()
             raise KeyboardInterrupt
 
-def init_wandb(hparams):
+def init_wandb(hparams, resume=False):
+    global wandb_id
+    print('='*5, "init wandb", '='*5)
     if hparams.use_wandb:
         group_vars = ["d_model", "n_heads", "random_seed", "max_steps", "max_epochs", "n_layers", "dropout", "max_context_len", "weight_noise", "train_data_pct", "math_operator", "operand_length", "weight_decay", "noise_factor", "weight_decay_kind", "batchsize", "max_lr", "warmup_steps", "anneal_lr", "anneal_lr_steps", "opt", "momentum"]
 
         group_name = ''
         for var in group_vars:
             group_name = group_name + '_' + var + str(getattr(hparams, var))
-        wandb.init(
+        run = wandb.init(
             project=hparams.wandb_project,
             entity=hparams.wandb_entity,
             group=hparams.group_name,
             #name=group_name, # too_long_for_that
             notes=group_name,
-            #resume=True
+            resume=True if resume else None,
+            id = wandb_id if resume else None
         )
+        if wandb_id is None : wandb_id = run.id
         for var in group_vars:
             wandb.config.update({var:getattr(hparams, var)})  
 

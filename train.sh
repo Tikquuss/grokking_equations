@@ -13,7 +13,8 @@ opt=${5-adamw}
 max_lr=${6-0.001}
 random_seed=${7-0}
 
-max_steps=100000
+#max_steps=100000
+max_steps=50000
 
 ### wandb ###
 # wandb_entity is the name of the team on wandb and is optional
@@ -23,7 +24,7 @@ use_wandb=True
 # remove random_seed in group_name
 group_name="tdp=${train_data_pct}-wd=${weight_decay}-d=${dropout}-opt=${opt}-mlr=${max_lr}-mo${math_operator}"
 wandb_entity="grokking_ppsp"
-wandb_project="grokking_phase_transition"
+wandb_project="grokking_operator=${math_operator}"
 
 ### Experiment dump path ###
 dump_path=..
@@ -37,7 +38,7 @@ early_stopping_step_val_acc_threshold=90.0
 
 ###
 ./scripts/train.py \
-		--batchsize 0 \
+		--batchsize -1 \
 		--n_layers 2 \
 		--n_heads 4 \
 		--d_model 128 \
